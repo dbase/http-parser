@@ -231,7 +231,10 @@ enum state
   , s_req_schema
   , s_req_schema_slash
   , s_req_schema_slash_slash
+  , s_req_host_start
   , s_req_host
+  , s_req_host_end
+  , s_req_host_ip_literal
   , s_req_port
   , s_req_path
   , s_req_query_string_start
@@ -315,6 +318,7 @@ enum header_states
 #define IS_ALPHA(c)         (LOWER(c) >= 'a' && LOWER(c) <= 'z')
 #define IS_NUM(c)           ((c) >= '0' && (c) <= '9')
 #define IS_ALPHANUM(c)      (IS_ALPHA(c) || IS_NUM(c))
+#define IS_LITERAL_CHAR(c)  (IS_NUM(c) || (LOWER(c) >= 'a' && LOWER(c) <= 'f') || (c) == '.' || (c) == ':')
 
 #if HTTP_PARSER_STRICT
 #define IS_URL_CHAR(c)      (normal_url_char[(unsigned char) (c)])
@@ -411,7 +415,8 @@ size_t http_parser_execute (http_parser *parser,
   if (state == s_req_path || state == s_req_schema || state == s_req_schema_slash
       || state == s_req_schema_slash_slash || state == s_req_port
       || state == s_req_query_string_start || state == s_req_query_string
-      || state == s_req_host
+      || state == s_req_host_start || state == s_req_host || state == s_req_host_end
+      || state == s_req_host_ip_literal
       || state == s_req_fragment_start || state == s_req_fragment)
     url_mark = data;
 
@@ -760,7 +765,7 @@ size_t http_parser_execute (http_parser *parser,
          */
         if (IS_ALPHA(ch) || (parser->method == HTTP_CONNECT && IS_NUM(ch))) {
           MARK(url);
-          state = (parser->method == HTTP_CONNECT) ? s_req_host : s_req_schema;
+          state = (parser->method == HTTP_CONNECT) ? s_req_host_start : s_req_schema;
           break;
         }
 
@@ -788,12 +793,23 @@ size_t http_parser_execute (http_parser *parser,
 
       case s_req_schema_slash_slash:
         STRICT_CHECK(ch != '/');
-        state = s_req_host;
+        state = s_req_host_start;
         break;
 
+      case s_req_host_start:
+        if (ch == '[') {
+          state = s_req_host_ip_literal;
+          break;
+        }
+        state = s_req_host;
+        /* fall through */
+
       case s_req_host:
-      {
         if (IS_HOST_CHAR(ch)) break;
+        /* fall through */
+
+      case s_req_host_end:
+      {
         switch (ch) {
           case ':':
             state = s_req_port;
@@ -817,6 +833,17 @@ size_t http_parser_execute (http_parser *parser,
             goto error;
         }
         break;
+      }
+
+      case s_req_host_ip_literal:
+      {
+        if (IS_LITERAL_CHAR(ch)) break;
+        if (ch == ']') {
+          state = s_req_host_end;
+          break;
+        } else {
+          SET_ERRNO(HPE_INVALID_HOST);
+        }
       }
 
       case s_req_port:
